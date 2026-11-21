@@ -14,6 +14,8 @@ h1{font-size:22px;margin:0 0 8px}
 .status{padding:12px;border-radius:10px;background:#eef5ff;margin:16px 0;font-size:14px;line-height:1.5}
 .status.error{background:#fee2e2;color:#991b1b}
 .actions{display:flex;gap:10px;flex-wrap:wrap;margin:14px 0}
+.camera-row{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:12px 0}
+select{flex:1;min-width:210px;padding:11px;border:1px solid #cbd5e1;border-radius:9px;background:#fff;color:#17324f;font-size:14px}
 button{border:0;border-radius:9px;padding:12px 18px;font-weight:700;font-size:15px;cursor:pointer;background:#1769aa;color:white}
 button.secondary{background:#e8eef5;color:#17324f}
 button:disabled{opacity:.55;cursor:not-allowed}
@@ -31,8 +33,13 @@ footer{font-size:12px;color:#64748b;margin-top:18px;line-height:1.5}
   <button id="start">Mulai Kamera</button>
   <button id="stop" class="secondary" disabled>Hentikan Kamera</button>
 </div>
+<div class="camera-row">
+  <label for="cameraSelect"><strong>Pilih kamera:</strong></label>
+  <select id="cameraSelect" disabled><option value="">Otomatis memilih kamera</option></select>
+  <button id="switchCamera" class="secondary" type="button" disabled>Ganti Kamera</button>
+</div>
 <div id="reader"></div>
-<footer>Jangan menutup tab aplikasi utama selama absensi berlangsung. Kamera hanya aktif pada tab pemindai ini. Pustaka pemindai dimuat dari CDN sehingga koneksi internet diperlukan.</footer>
+<footer>Jangan menutup tab aplikasi utama selama absensi berlangsung. Kamera belakang diprioritaskan pada iPhone/Android. Gunakan pilihan kamera untuk beralih ke kamera depan bila diperlukan. Kamera hanya aktif pada tab pemindai ini. Pustaka pemindai dimuat dari CDN sehingga koneksi internet diperlukan.</footer>
 </main>
 <script>
 (function(){
@@ -54,6 +61,10 @@ footer{font-size:12px;color:#64748b;margin-top:18px;line-height:1.5}
   var statusEl = document.getElementById('status');
   var startBtn = document.getElementById('start');
   var stopBtn = document.getElementById('stop');
+  var cameraSelect = document.getElementById('cameraSelect');
+  var switchCameraBtn = document.getElementById('switchCamera');
+  var camerasCache = [];
+  var selectedCameraId = '';
   var scanner = null;
   var scanning = false;
   var paused = false;
@@ -105,6 +116,35 @@ footer{font-size:12px;color:#64748b;margin-top:18px;line-height:1.5}
     return name + ': ' + message;
   }
 
+  function isAppleMobile(){
+    var ua = navigator.userAgent || '';
+    return /iPhone|iPad|iPod/i.test(ua) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  }
+
+  function preferredCamera(cameras){
+    if (!cameras || !cameras.length) return null;
+    var labels = cameras.map(function(camera){ return String(camera.label || ''); });
+    if (isAppleMobile()) {
+      return cameras.find(function(camera){ return /back|rear|environment|belakang/i.test(camera.label || ''); }) || cameras[cameras.length - 1];
+    }
+    return cameras.find(function(camera){ return /usb|webcam|uvc/i.test(camera.label || ''); }) ||
+      cameras.find(function(camera){ return /back|rear|environment|belakang/i.test(camera.label || ''); }) || cameras[0];
+  }
+
+  function populateCameraChoices(cameras, preferredId){
+    camerasCache = cameras || [];
+    cameraSelect.innerHTML = '';
+    camerasCache.forEach(function(camera, index){
+      var option = document.createElement('option');
+      option.value = camera.id;
+      option.textContent = camera.label || ('Kamera ' + (index + 1));
+      cameraSelect.appendChild(option);
+    });
+    cameraSelect.disabled = camerasCache.length < 2;
+    switchCameraBtn.disabled = camerasCache.length < 2;
+    if (preferredId) cameraSelect.value = preferredId;
+  }
+
   async function stopCamera(showMessage){
     if (scanner && scanning) {
       try { await scanner.stop(); } catch(e) {}
@@ -114,17 +154,17 @@ footer{font-size:12px;color:#64748b;margin-top:18px;line-height:1.5}
     scanning = false;
     paused = false;
     stopBtn.disabled = true;
-    if (showMessage !== false) setStatus('Kamera dihentikan.');
+    if (showMessage !== false) setStatus('Kamera dihentikan. Pilih kamera lalu tekan Mulai Kamera untuk melanjutkan.');
   }
 
-  async function startCamera(){
+  async function startCamera(cameraIdOverride){
     if (!parentIsValid || !sessionId || !channel || !window.opener || window.opener.closed) {
       setStatus('Parameter sesi atau asal aplikasi tidak valid. Tutup tab ini dan buka pemindai dari aplikasi utama.', true);
       startBtn.disabled = true;
       return;
     }
     if (!window.isSecureContext || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-      setStatus('Browser tidak menyediakan akses kamera. Pastikan halaman pemindai dibuka melalui HTTPS di Chrome.', true);
+      setStatus('Browser tidak menyediakan akses kamera. Pastikan halaman pemindai dibuka melalui HTTPS.', true);
       return;
     }
     if (typeof Html5Qrcode === 'undefined') {
@@ -133,82 +173,8 @@ footer{font-size:12px;color:#64748b;margin-top:18px;line-height:1.5}
     }
 
     startBtn.disabled = true;
+    switchCameraBtn.disabled = true;
     try {
-      var permissionStream = await navigator.mediaDevices.getUserMedia({video:true, audio:false});
-      permissionStream.getTracks().forEach(function(track){ track.stop(); });
-
-      var cameras = await Html5Qrcode.getCameras();
-      if (!cameras || !cameras.length) {
-        var noCameraError = new Error('Tidak ada webcam terdeteksi.');
-        noCameraError.name = 'NotFoundError';
-        throw noCameraError;
-      }
-
-      var selectedCamera = cameras.find(function(camera){
-        return /usb|webcam|uvc|camera/i.test(camera.label || '');
-      }) || cameras[0];
-
-      scanner = new Html5Qrcode('reader');
-      await scanner.start(
-        selectedCamera.id,
-        {fps:10, qrbox:{width:250, height:250}},
-        function(decodedText){
-          var now = Date.now();
-          if (paused || (decodedText === lastText && now - lastAt < 2500)) return;
-          paused = true;
-          lastText = decodedText;
-          lastAt = now;
-          try { scanner.pause(true); } catch(e) {}
-          setStatus('QR terbaca. Menunggu validasi dari aplikasi utama...');
-          send('ST_QR_SCAN', {text:String(decodedText)});
-        },
-        function(){}
-      );
-
-      scanning = true;
-      stopBtn.disabled = false;
-      setStatus('Kamera aktif: ' + (selectedCamera.label || 'Webcam terpilih') + '. Arahkan QR operator ke kamera.');
-    } catch(error) {
-      await stopCamera(false);
-      var message = explain(error);
-      setStatus(message, true);
-      send('ST_QR_SCANNER_ERROR', {message:message});
-    } finally {
-      startBtn.disabled = false;
-    }
-  }
-
-  startBtn.addEventListener('click', startCamera);
-  stopBtn.addEventListener('click', function(){ stopCamera(true); });
-
-  window.addEventListener('message', function(event){
-    if (!parentIsValid || event.source !== window.opener || event.origin !== parentOrigin) return;
-    var data = event.data || {};
-    if (data.channel !== channel || String(data.sessionId) !== String(sessionId)) return;
-
-    if (data.type === 'ST_QR_STOP') {
-      stopCamera(true);
-    } else if (data.type === 'ST_QR_RESUME') {
-      if (scanner && scanning) {
-        paused = false;
-        try { scanner.resume(); } catch(error) {
-          setStatus('Pemindai tidak dapat dilanjutkan. Tekan Mulai Kamera untuk mencoba kembali.', true);
-        }
-      } else {
-        startCamera();
-      }
-    }
-  });
-
-  parentIsValid = validateParent();
-  if (!sessionId || !channel || !parentIsValid || !window.opener) {
-    setStatus('Parameter sesi tidak lengkap atau asal aplikasi tidak diizinkan. Buka tab ini melalui tombol pemindai pada aplikasi GO / NO GO.', true);
-    startBtn.disabled = true;
-  } else {
-    setStatus('Terhubung dengan aplikasi utama. Klik Mulai Kamera dan izinkan akses webcam bila diminta.');
-    send('ST_QR_SCANNER_READY');
-  }
-})();
-</script>
-</body>
-</html>
+      // Request permission first so iOS exposes camera labels/device IDs.
+      var permissionStream = await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'environment'}}, audio:false});
+      permissionStream.getTracks
