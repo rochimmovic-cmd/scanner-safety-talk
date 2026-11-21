@@ -1,0 +1,206 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Pemindai QR Safety Talk</title>
+<style>
+:root{font-family:Arial,sans-serif;color:#17324f;background:#f2f6fb}
+*{box-sizing:border-box}
+body{margin:0;padding:20px}
+.wrap{max-width:820px;margin:0 auto;background:#fff;border:1px solid #d9e2ee;border-radius:16px;padding:22px;box-shadow:0 8px 28px #17324f12}
+h1{font-size:22px;margin:0 0 8px}
+.muted{color:#64748b;font-size:14px;line-height:1.5}
+.status{padding:12px;border-radius:10px;background:#eef5ff;margin:16px 0;font-size:14px;line-height:1.5}
+.status.error{background:#fee2e2;color:#991b1b}
+.actions{display:flex;gap:10px;flex-wrap:wrap;margin:14px 0}
+button{border:0;border-radius:9px;padding:12px 18px;font-weight:700;font-size:15px;cursor:pointer;background:#1769aa;color:white}
+button.secondary{background:#e8eef5;color:#17324f}
+button:disabled{opacity:.55;cursor:not-allowed}
+#reader{width:100%;max-width:640px;margin:12px auto;overflow:hidden;border-radius:12px}
+footer{font-size:12px;color:#64748b;margin-top:18px;line-height:1.5}
+</style>
+<script src="https://cdn.jsdelivr.net/npm/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+</head>
+<body>
+<main class="wrap">
+<h1>Pemindai QR Safety Talk</h1>
+<div class="muted">Halaman ini digunakan khusus untuk membaca QR pribadi operator. Hasil pemindaian dikirim kembali ke tab aplikasi GO / NO GO untuk divalidasi dan dicatat.</div>
+<div id="status" class="status">Memeriksa koneksi ke aplikasi utama...</div>
+<div class="actions">
+  <button id="start">Mulai Kamera</button>
+  <button id="stop" class="secondary" disabled>Hentikan Kamera</button>
+</div>
+<div id="reader"></div>
+<footer>Jangan menutup tab aplikasi utama selama absensi berlangsung. Kamera hanya aktif pada tab pemindai ini. Pustaka pemindai dimuat dari CDN sehingga koneksi internet diperlukan.</footer>
+</main>
+<script>
+(function(){
+  'use strict';
+
+  var ALLOWED_PARENT_HOSTS = ['script.google.com'];
+  var params = new URLSearchParams(location.search);
+  var sessionId = params.get('sessionId') || '';
+  var channel = params.get('channel') || '';
+  var parentOrigin = params.get('parentOrigin') || '';
+  var statusEl = document.getElementById('status');
+  var startBtn = document.getElementById('start');
+  var stopBtn = document.getElementById('stop');
+  var scanner = null;
+  var scanning = false;
+  var paused = false;
+  var lastText = '';
+  var lastAt = 0;
+  var parentIsValid = false;
+
+  function validateParent(){
+    try {
+      var u = new URL(parentOrigin);
+      return u.protocol === 'https:' &&
+        ALLOWED_PARENT_HOSTS.indexOf(u.hostname.toLowerCase()) !== -1 &&
+        u.origin === parentOrigin;
+    } catch(e) {
+      return false;
+    }
+  }
+
+  function send(type, extra){
+    if (!parentIsValid || !window.opener || window.opener.closed) return;
+    var message = Object.assign({
+      type: type,
+      sessionId: sessionId,
+      channel: channel
+    }, extra || {});
+    window.opener.postMessage(message, parentOrigin);
+  }
+
+  function setStatus(message, isError){
+    statusEl.textContent = message;
+    statusEl.className = 'status' + (isError ? ' error' : '');
+  }
+
+  function explain(error){
+    var name = error && error.name ? error.name : 'Error';
+    var message = error && error.message ? error.message : String(error || '');
+    if (name === 'NotAllowedError' || name === 'PermissionDeniedError' || name === 'SecurityError') {
+      return 'Akses kamera ditolak. Pastikan izin kamera untuk situs hosting pemindai di Chrome adalah Izinkan, lalu muat ulang tab ini. ' + message;
+    }
+    if (name === 'NotFoundError' || name === 'DevicesNotFoundError') {
+      return 'Webcam tidak ditemukan. Periksa sambungan USB dan pilihan kamera Windows. ' + message;
+    }
+    if (name === 'NotReadableError' || name === 'TrackStartError') {
+      return 'Webcam sedang digunakan aplikasi lain atau tidak dapat dibuka. Tutup Camera/Teams dan coba lagi. ' + message;
+    }
+    if (name === 'OverconstrainedError') {
+      return 'Webcam tidak mendukung konfigurasi yang diminta. Coba pilih kamera lain. ' + message;
+    }
+    return name + ': ' + message;
+  }
+
+  async function stopCamera(showMessage){
+    if (scanner && scanning) {
+      try { await scanner.stop(); } catch(e) {}
+      try { scanner.clear(); } catch(e) {}
+    }
+    scanner = null;
+    scanning = false;
+    paused = false;
+    stopBtn.disabled = true;
+    if (showMessage !== false) setStatus('Kamera dihentikan.');
+  }
+
+  async function startCamera(){
+    if (!parentIsValid || !sessionId || !channel || !window.opener || window.opener.closed) {
+      setStatus('Parameter sesi atau asal aplikasi tidak valid. Tutup tab ini dan buka pemindai dari aplikasi utama.', true);
+      startBtn.disabled = true;
+      return;
+    }
+    if (!window.isSecureContext || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      setStatus('Browser tidak menyediakan akses kamera. Pastikan halaman pemindai dibuka melalui HTTPS di Chrome.', true);
+      return;
+    }
+    if (typeof Html5Qrcode === 'undefined') {
+      setStatus('Pustaka QR gagal dimuat. Periksa koneksi internet atau pemblokir konten, lalu muat ulang halaman.', true);
+      return;
+    }
+
+    startBtn.disabled = true;
+    try {
+      var permissionStream = await navigator.mediaDevices.getUserMedia({video:true, audio:false});
+      permissionStream.getTracks().forEach(function(track){ track.stop(); });
+
+      var cameras = await Html5Qrcode.getCameras();
+      if (!cameras || !cameras.length) {
+        var noCameraError = new Error('Tidak ada webcam terdeteksi.');
+        noCameraError.name = 'NotFoundError';
+        throw noCameraError;
+      }
+
+      var selectedCamera = cameras.find(function(camera){
+        return /usb|webcam|uvc|camera/i.test(camera.label || '');
+      }) || cameras[0];
+
+      scanner = new Html5Qrcode('reader');
+      await scanner.start(
+        selectedCamera.id,
+        {fps:10, qrbox:{width:250, height:250}},
+        function(decodedText){
+          var now = Date.now();
+          if (paused || (decodedText === lastText && now - lastAt < 2500)) return;
+          paused = true;
+          lastText = decodedText;
+          lastAt = now;
+          try { scanner.pause(true); } catch(e) {}
+          setStatus('QR terbaca. Menunggu validasi dari aplikasi utama...');
+          send('ST_QR_SCAN', {text:String(decodedText)});
+        },
+        function(){}
+      );
+
+      scanning = true;
+      stopBtn.disabled = false;
+      setStatus('Kamera aktif: ' + (selectedCamera.label || 'Webcam terpilih') + '. Arahkan QR operator ke kamera.');
+    } catch(error) {
+      await stopCamera(false);
+      var message = explain(error);
+      setStatus(message, true);
+      send('ST_QR_SCANNER_ERROR', {message:message});
+    } finally {
+      startBtn.disabled = false;
+    }
+  }
+
+  startBtn.addEventListener('click', startCamera);
+  stopBtn.addEventListener('click', function(){ stopCamera(true); });
+
+  window.addEventListener('message', function(event){
+    if (!parentIsValid || event.source !== window.opener || event.origin !== parentOrigin) return;
+    var data = event.data || {};
+    if (data.channel !== channel || String(data.sessionId) !== String(sessionId)) return;
+
+    if (data.type === 'ST_QR_STOP') {
+      stopCamera(true);
+    } else if (data.type === 'ST_QR_RESUME') {
+      if (scanner && scanning) {
+        paused = false;
+        try { scanner.resume(); } catch(error) {
+          setStatus('Pemindai tidak dapat dilanjutkan. Tekan Mulai Kamera untuk mencoba kembali.', true);
+        }
+      } else {
+        startCamera();
+      }
+    }
+  });
+
+  parentIsValid = validateParent();
+  if (!sessionId || !channel || !parentIsValid || !window.opener) {
+    setStatus('Parameter sesi tidak lengkap atau asal aplikasi tidak diizinkan. Buka tab ini melalui tombol pemindai pada aplikasi GO / NO GO.', true);
+    startBtn.disabled = true;
+  } else {
+    setStatus('Terhubung dengan aplikasi utama. Klik Mulai Kamera dan izinkan akses webcam bila diminta.');
+    send('ST_QR_SCANNER_READY');
+  }
+})();
+</script>
+</body>
+</html>
