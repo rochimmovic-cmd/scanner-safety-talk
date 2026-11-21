@@ -175,6 +175,8 @@ footer{font-size:12px;color:#64748b;margin-top:18px;line-height:1.5}
   }
 
   async function startCamera(cameraIdOverride){
+    // Ignore browser click-event objects; only a real camera ID string is valid here.
+    if (typeof cameraIdOverride !== 'string') cameraIdOverride = '';
     if (!parentIsValid || !sessionId || !channel || !window.opener || window.opener.closed) {
       setStatus('Parameter sesi atau asal aplikasi tidak valid. Tutup tab ini dan buka pemindai dari aplikasi utama.', true);
       startBtn.disabled = true;
@@ -249,7 +251,7 @@ footer{font-size:12px;color:#64748b;margin-top:18px;line-height:1.5}
     await startCamera(nextId);
   }
 
-  startBtn.addEventListener('click', startCamera);
+  startBtn.addEventListener('click', function(){ startCamera(); });
   stopBtn.addEventListener('click', function(){ stopCamera(true); });
   switchCameraBtn.addEventListener('click', switchCamera);
 
