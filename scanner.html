@@ -38,7 +38,14 @@ footer{font-size:12px;color:#64748b;margin-top:18px;line-height:1.5}
 (function(){
   'use strict';
 
+  // Apps Script may serve the web app from script.google.com or a
+  // Google-managed script.googleusercontent.com subdomain.
   var ALLOWED_PARENT_HOSTS = ['script.google.com'];
+  function isAllowedParentHost(hostname){
+    hostname = String(hostname || '').toLowerCase();
+    return ALLOWED_PARENT_HOSTS.indexOf(hostname) !== -1 ||
+      hostname.endsWith('.script.googleusercontent.com');
+  }
   var params = new URLSearchParams(location.search);
   var sessionId = params.get('sessionId') || '';
   var channel = params.get('channel') || '';
@@ -57,7 +64,7 @@ footer{font-size:12px;color:#64748b;margin-top:18px;line-height:1.5}
     try {
       var u = new URL(parentOrigin);
       return u.protocol === 'https:' &&
-        ALLOWED_PARENT_HOSTS.indexOf(u.hostname.toLowerCase()) !== -1 &&
+        isAllowedParentHost(u.hostname) &&
         u.origin === parentOrigin;
     } catch(e) {
       return false;
